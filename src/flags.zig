@@ -12,6 +12,8 @@ pub const Options = struct {
 };
 
 pub fn parse(
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
     args: []const [:0]const u8,
     /// The name of your program.
     comptime exe_name: []const u8,
@@ -24,5 +26,5 @@ pub fn parse(
         .colors = options.colors,
     };
 
-    return parser.parse(Flags, exe_name);
+    return parser.parse(io, environ_map, Flags, exe_name);
 }

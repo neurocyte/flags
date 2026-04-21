@@ -14,18 +14,19 @@ args: []const [:0]const u8,
 current_arg: usize,
 colors: *const ColorScheme,
 
-fn fatal(parser: *const Parser, comptime fmt: []const u8, args: anytype) noreturn {
-    const stderr_file = std.fs.File.stderr();
-    var stderr_file_writer = stderr_file.writer(&.{});
-    const stderr = Terminal.init(stderr_file, &stderr_file_writer.interface);
-    stderr.print(parser.colors.error_label, "Error: ", .{});
-    stderr.print(parser.colors.error_message, fmt ++ "\n", args);
+fn fatal(parser: *const Parser, tty: Terminal, comptime fmt: []const u8, args: anytype) noreturn {
+    tty.print(parser.colors.error_label, "Error: ", .{});
+    tty.print(parser.colors.error_message, fmt ++ "\n", args);
     std.process.exit(1);
 }
 
-pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Flags {
+pub fn parse(parser: *Parser, io: std.Io, environ_map: *const std.process.Environ.Map, Flags: type, comptime command_name: []const u8) Flags {
     const info = comptime meta.info(Flags);
     const help = comptime Help.generate(Flags, info, command_name);
+
+    const stderr_file = std.Io.File.stderr();
+    var stderr_file_writer = stderr_file.writer(io, &.{});
+    const stderr = Terminal.init(io, environ_map, stderr_file, &stderr_file_writer.interface);
 
     var flags: Flags = undefined;
     var passed: std.enums.EnumFieldStruct(std.meta.FieldEnum(Flags), bool, false) = .{};
@@ -39,18 +40,21 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
 
     next_arg: while (parser.nextArg()) |arg| {
         if (arg.len == 0) {
-            parser.fatal("empty argument", .{});
+            parser.fatal(stderr, "empty argument", .{});
         }
 
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            help.render(std.fs.File.stdout(), parser.colors);
+            const stdout = std.Io.File.stdout();
+            var stdout_writer = stdout.writer(io, &.{});
+            const tty = Terminal.init(io, environ_map, stdout, &stdout_writer.interface);
+            help.render(tty, parser.colors);
             std.process.exit(0);
         }
 
         if (std.mem.eql(u8, arg, "--")) {
             // Blindly treat remaining arguments as positional.
             while (parser.nextArg()) |positional| {
-                if (parser.parsePositional(positional, positional_index, info.positionals, &flags) == .consumed_all) {
+                if (parser.parsePositional(stderr, positional, positional_index, info.positionals, &flags) == .consumed_all) {
                     break :next_arg;
                 }
                 positional_index += 1;
@@ -59,17 +63,17 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
 
         if (std.mem.startsWith(u8, arg, "--")) {
             inline for (info.flags) |flag| if (std.mem.eql(u8, arg, flag.flag_name)) {
-                @field(flags, flag.field_name) = parser.parseOption(flag.type, flag.flag_name);
+                @field(flags, flag.field_name) = parser.parseOption(stderr, flag.type, flag.flag_name);
                 @field(passed, flag.field_name) = true;
                 continue :next_arg;
             };
 
-            parser.fatal("unrecognized flag: {s}", .{arg});
+            parser.fatal(stderr, "unrecognized flag: {s}", .{arg});
         }
 
         if (std.mem.startsWith(u8, arg, "-")) {
             if (arg.len == 1) {
-                parser.fatal("unrecognized argument: '-'", .{});
+                parser.fatal(stderr, "unrecognized argument: '-'", .{});
             }
 
             const switch_set = arg[1..];
@@ -79,9 +83,10 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
                         // Removing this check would allow formats like:
                         // `$ <cmd> -abc value-for-a value-for-b value-for-c`
                         if (flag.type != bool and i < switch_set.len - 1) {
-                            parser.fatal("missing value after switch: {c}", .{switch_char});
+                            parser.fatal(stderr, "missing value after switch: {c}", .{switch_char});
                         }
                         @field(flags, flag.field_name) = parser.parseOption(
+                            stderr,
                             flag.type,
                             &.{ '-', switch_char },
                         );
@@ -89,7 +94,7 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
                         continue :next_switch;
                     }
                 };
-                parser.fatal("unrecognized switch: {c}", .{ch});
+                parser.fatal(stderr, "unrecognized switch: {c}", .{ch});
             }
             continue :next_arg;
         }
@@ -103,7 +108,7 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
             }
         }
 
-        if (parser.parsePositional(arg, positional_index, info.positionals, &flags) == .consumed_all) {
+        if (parser.parsePositional(stderr, arg, positional_index, info.positionals, &flags) == .consumed_all) {
             break :next_arg;
         }
         positional_index += 1;
@@ -115,7 +120,7 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
                 .bool => false,
                 .optional => null,
                 else => {
-                    parser.fatal("missing required flag: {s}", .{flag.flag_name});
+                    parser.fatal(stderr, "missing required flag: {s}", .{flag.flag_name});
                 },
             };
     };
@@ -126,14 +131,14 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
                 switch (@typeInfo(pos.type)) {
                     .optional => null,
                     else => {
-                        parser.fatal("missing required argument: {s}", .{pos.arg_name});
+                        parser.fatal(stderr, "missing required argument: {s}", .{pos.arg_name});
                     },
                 };
         }
     }
 
     if (info.subcommands.len > 0 and !passed.command) {
-        parser.fatal("missing subcommand", .{});
+        parser.fatal(stderr, "missing subcommand", .{});
     }
 
     return flags;
@@ -141,6 +146,7 @@ pub fn parse(parser: *Parser, Flags: type, comptime command_name: []const u8) Fl
 
 fn parsePositional(
     parser: *Parser,
+    stderr: Terminal,
     arg: [:0]const u8,
     index: usize,
     comptime positionals: []const meta.Positional,
@@ -152,7 +158,7 @@ fn parsePositional(
             parser.current_arg = parser.args.len;
             return .consumed_all;
         }
-        parser.fatal("unexpected argument: {s}", .{arg});
+        parser.fatal(stderr, "unexpected argument: {s}", .{arg});
     }
 
     switch (index) {
@@ -167,27 +173,29 @@ fn parsePositional(
     }
 }
 
-fn parseOption(parser: *Parser, T: type, option_name: []const u8) T {
+fn parseOption(parser: *Parser, stderr: Terminal, T: type, option_name: []const u8) T {
     if (T == bool) return true;
 
     const value = parser.nextArg() orelse {
-        parser.fatal("missing value for '{s}'", .{option_name});
+        parser.fatal(stderr, "missing value for '{s}'", .{option_name});
     };
 
-    return parser.parseValue(meta.unwrapOptional(T), value);
+    return parser.parseValue(stderr, meta.unwrapOptional(T), value);
 }
 
-fn parseValue(parser: *const Parser, T: type, arg: [:0]const u8) T {
+fn parseValue(parser: *const Parser, stderr: Terminal, T: type, arg: [:0]const u8) T {
     if (T == []const u8 or T == [:0]const u8) return arg;
 
     switch (@typeInfo(T)) {
         .int => |info| return std.fmt.parseInt(T, arg, 10) catch |err| {
             switch (err) {
                 error.Overflow => parser.fatal(
+                    stderr,
                     "value out of bounds for {d}-bit {s} integer: {s}",
                     .{ info.bits, @tagName(info.signedness), arg },
                 ),
                 error.InvalidCharacter => parser.fatal(
+                    stderr,
                     "expected integer number, found '{s}'",
                     .{arg},
                 ),
@@ -196,7 +204,7 @@ fn parseValue(parser: *const Parser, T: type, arg: [:0]const u8) T {
 
         .float => return std.fmt.parseFloat(T, arg) catch |err| switch (err) {
             error.InvalidCharacter => {
-                parser.fatal("expected numerical value, found '{s}'", .{arg});
+                parser.fatal(stderr, "expected numerical value, found '{s}'", .{arg});
             },
         },
 
@@ -207,7 +215,7 @@ fn parseValue(parser: *const Parser, T: type, arg: [:0]const u8) T {
                 }
             }
 
-            parser.fatal("unrecognized option: '{s}'", .{arg});
+            parser.fatal(stderr, "unrecognized option: '{s}'", .{arg});
         },
 
         else => comptime meta.compileError("invalid flag type: {s}", .{@typeName(T)}),

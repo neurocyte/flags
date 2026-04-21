@@ -3,16 +3,16 @@ const Terminal = @This();
 const std = @import("std");
 const ColorScheme = @import("ColorScheme.zig");
 
-const tty = std.Io.tty;
-const File = std.fs.File;
+tty: std.Io.Terminal,
 
-writer: *std.Io.Writer,
-config: tty.Config,
-
-pub fn init(file: File, writer: *std.Io.Writer) Terminal {
+pub fn init(io: std.Io, environ_map: *const std.process.Environ.Map, file: std.Io.File, writer: *std.Io.Writer) Terminal {
+    const NO_COLOR = if (environ_map.get("NO_COLOR")) |v| v.len > 0 else false;
+    const CLICOLOR_FORCE = if (environ_map.get("CLICOLOR_FORCE")) |v| v.len > 0 else false;
     return .{
-        .writer = writer,
-        .config = tty.detectConfig(file),
+        .tty = .{
+            .writer = writer,
+            .mode = std.Io.Terminal.Mode.detect(io, file, NO_COLOR, CLICOLOR_FORCE) catch .no_color,
+        },
     };
 }
 
@@ -23,12 +23,12 @@ pub fn print(
     args: anytype,
 ) void {
     for (style) |color| {
-        terminal.config.setColor(terminal.writer, color) catch {};
+        terminal.tty.setColor(color) catch {};
     }
 
-    terminal.writer.print(format, args) catch {};
+    terminal.tty.writer.print(format, args) catch {};
 
     if (style.len > 0) {
-        terminal.config.setColor(terminal.writer, .reset) catch {};
+        terminal.tty.setColor(.reset) catch {};
     }
 }
