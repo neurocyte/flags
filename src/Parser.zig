@@ -22,7 +22,10 @@ fn fatal(parser: *const Parser, tty: Terminal, comptime fmt: []const u8, args: a
 
 pub fn parse(parser: *Parser, io: std.Io, environ_map: *const std.process.Environ.Map, Flags: type, comptime command_name: []const u8) Flags {
     const info = comptime meta.info(Flags);
-    const help = comptime Help.generate(Flags, info, command_name);
+    const help = comptime blk: {
+        @setEvalBranchQuota(10_000);
+        break :blk Help.generate(Flags, info, command_name);
+    };
 
     const stderr_file = std.Io.File.stderr();
     var stderr_file_writer = stderr_file.writer(io, &.{});
